@@ -38,9 +38,22 @@ syscall_init (void) {
 }
 
 /* The main system call interface */
+
+struct entry_table {
+	const char *name;
+	int argc;
+	void *fn;
+};
+
+// struct entry_table *syscall_table[NR_]
+
 void
 syscall_handler (struct intr_frame *f UNUSED) {
-	// TODO: Your implementation goes here.
+	/* f에서 syscall 번호 읽기 */
+	/* 진입 시점의 RAX -> 시스템콜 번호 */
+	uint64_t *syscall_no = f->R.rax;
+
+
 	printf ("system call!\n");
 	thread_exit ();
 }

@@ -4,6 +4,8 @@
 #include <round.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 #include "userprog/gdt.h"
 #include "userprog/tss.h"
@@ -160,10 +162,79 @@ error:
 
 /* Switch the current execution context to the f_name.
  * Returns -1 on fail. */
+
+/* helper funcs */
+
+uint8_t *stack_align (uintptr_t rsp, char *argv[], int argc){
+	uint8_t *user_ptr = (uint8_t *)rsp;
+	
+	/* user stack에 거꾸로 포인터 담기 */
+
+	for (int i = argc; i > 0; i--){
+		size_t n = strlen(argv[i-1]);
+		user_ptr -= (n+1);
+		memcpy(user_ptr, argv[i-1], n+1);
+	}
+
+	/* 16바이트 정렬 */
+
+	if((uintptr_t)user_ptr % 16 != 0){
+		size_t pad = (16 -((uintptr_t)user_ptr % 16)) % 16;
+		user_ptr -= pad;
+		memset(user_ptr, 0, pad);
+	}
+	/* NULL */
+	user_ptr -= sizeof(void *);
+	memset(user_ptr, 0, sizeof(void*));
+
+	/* 주소값 담기 */
+
+	for(int i = argc; i > 0; i--){
+		user_ptr -= sizeof(void *);
+		memcpy(user_ptr, &argv[i-1],sizeof(void *));
+	}
+
+	return user_ptr;
+}
+
+char *parsing_filename (const char *file_name, char **out_prog, char *out_argv[], int *out_argc) {
+	/* 버퍼 세팅 */
+	char *buf = palloc_get_page(PAL_ZERO);
+	if(!buf){
+		palloc_free_page(buf);
+		return NULL;
+	}
+	
+	/* 사이즈 넘치면 넘기기 */
+	size_t len = strlcpy(buf,file_name,PGSIZE);
+	if(len >= PGSIZE){
+		palloc_free_page(buf);
+		return NULL;
+	}
+	
+	/* save_ptr 첫 공백 다음으로 넘어감 */
+	char *save_ptr = NULL;
+	*out_prog = strtok_r(buf, " \t", &save_ptr);
+	
+	int i = 1;
+	out_argv[0] = *out_prog;
+
+	while (save_ptr != NULL) {
+		const char *argv_ptr = NULL;
+		out_argv[i] = strtok_r(save_ptr," \t", &argv_ptr);
+		save_ptr = argv_ptr;
+		i++;
+	}
+	*out_argc = i;
+	return buf;
+}
 int
 process_exec (void *f_name) {
 	char *file_name = f_name;
 	bool success;
+	char *prog = NULL;
+	char *argv[64];
+	int argc = 0;
 
 	/* We cannot use the intr_frame in the thread structure.
 	 * This is because when current thread rescheduled,
@@ -177,13 +248,15 @@ process_exec (void *f_name) {
 	process_cleanup ();
 
 	/* And then load the binary */
-	success = load (file_name, &_if);
+	char *buf = parsing_filename(file_name,&prog,argv,&argc);
+	success = load (prog, &_if);
+	_if.rsp = stack_align(_if.rsp,argv,argc);
+	palloc_free_page(buf);
 
 	/* If load failed, quit. */
-	palloc_free_page (file_name);
 	if (!success)
 		return -1;
-
+		
 	/* Start switched process. */
 	do_iret (&_if);
 	NOT_REACHED ();
@@ -204,6 +277,7 @@ process_wait (tid_t child_tid UNUSED) {
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
+	for(;;);
 	return -1;
 }
 
