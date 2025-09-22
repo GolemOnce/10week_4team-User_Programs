@@ -28,6 +28,8 @@ typedef int tid_t;
 #define PRI_MAX 63             /* 최대(가장 높은) 우선순위 */
 #define DONATION_DEPTH_LIMIT 8 // 최대 깊이 제한(순환, 무한 전파 방지)
 
+#define FDT_PAGES 3
+#define FDCOUNT_LIMIT FDT_PAGES * (1<<9)
 /* 커널 스레드 또는 사용자 프로세스.
  *
  * 각 스레드 구조체(struct thread)는 자신의 4 kB 페이지 하나에 저장된다.
@@ -95,10 +97,18 @@ struct thread {
     struct list_elem donation_elem; // donation 리스트 전용 손잡이(중요)
     struct list_elem allelem;       // 전체 스레드 순회용
 
-#ifdef USERPROG
+// #ifdef USERPROG
     /* userprog/process.c에서 관리 */
     uint64_t *pml4; /* 사용자 주소 공간의 최상위 페이지 테이블(PML4) 포인터 */
-#endif
+    
+    struct thread *parent;
+    struct list child_list; 
+    struct file *running_file;      /* */
+    struct file **fd_table;         /* fd테이블 */
+    int fd_idx;                     /* fd테이블 탐색용 인덱스 */
+    int exit_status;                /* 사용자 프로그램 종료코드 보관용  */
+
+// #endif
 #ifdef VM
     /* 이 스레드가 소유한 전체 가상 메모리를 추적하는 보조 페이지 테이블 */
     struct supplemental_page_table spt;

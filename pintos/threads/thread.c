@@ -501,6 +501,8 @@ static void init_thread(struct thread *t, const char *name, int priority) {
     t->nice = 0;                  /* 기본값 */
     t->recent_cpu = INT_TO_FP(0); /* 0 */
 
+    t->exit_status = 0;
+
     list_push_back(&all_list, &t->allelem); /* 모든 스레드 목록에 등록 */
 }
 
