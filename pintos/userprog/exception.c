@@ -1,17 +1,17 @@
 #include "userprog/exception.h"
-#include <inttypes.h>
-#include <stdio.h>
-#include "userprog/gdt.h"
+#include "intrinsic.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 #include "intrinsic.h"
 #include "userprog/syscall.h"
 
-/* Number of page faults processed. */
+
+/* 처리된 페이지 폴트의 개수 */
 static long long page_fault_cnt;
 
 static void kill (struct intr_frame *);
 static void page_fault (struct intr_frame *);
+
 
 /* 유저 프로그램에 의해 발생할 수 있는 예외(interrupt/exception) 핸들러를 등록합니다.
  *
@@ -28,6 +28,7 @@ static void page_fault (struct intr_frame *);
  * "Exception and Interrupt Reference"를 참고하세요. */
 void
 exception_init (void) {
+
     /* 다음 예외들은 유저 프로그램이 명시적으로 발생시킬 수 있습니다.
        예: INT, INT3, INTO, BOUND 명령어 사용 시.
        따라서 DPL(Descriptor Privilege Level)을 3으로 설정하여
@@ -36,6 +37,7 @@ exception_init (void) {
 	intr_register_int (4, 3, INTR_ON, kill, "#OF Overflow Exception");
 	intr_register_int (5, 3, INTR_ON, kill,
 			"#BR BOUND Range Exceeded Exception");
+
 
     /* 다음 예외들은 DPL=0이므로 유저 프로그램이 INT 명령어로 직접 호출할 수는 없습니다.
        그러나 간접적으로는 발생할 수 있습니다.
@@ -49,6 +51,7 @@ exception_init (void) {
 	intr_register_int (13, 0, INTR_ON, kill, "#GP General Protection Exception");
 	intr_register_int (16, 0, INTR_ON, kill, "#MF x87 FPU Floating-Point Error");
 	intr_register_int (19, 0, INTR_ON, kill, "#XF SIMD Floating-Point Exception");
+
 
     /* 대부분의 예외는 인터럽트를 켠 상태에서도 안전하게 처리할 수 있습니다.
        하지만 페이지 폴트는 CR2 레지스터에 fault 주소가 저장되는데,
@@ -98,6 +101,7 @@ kill (struct intr_frame *f) {
 	}
 }
 
+
 /* 페이지 폴트 핸들러.
  * 현재는 스켈레톤이며, Project 3(가상 메모리)에서 확장해야 합니다.
  *
@@ -111,6 +115,7 @@ kill (struct intr_frame *f) {
  */
 static void
 page_fault (struct intr_frame *f) {
+
     bool not_present; /* true: 매핑이 없는 페이지 접근, false: 권한 위반 */
     bool write;       /* true: 쓰기 접근, false: 읽기 접근 */
     bool user;        /* true: 유저 모드 접근, false: 커널 모드 접근 */
@@ -149,5 +154,5 @@ page_fault (struct intr_frame *f) {
 			write ? "writing" : "reading",
 			user ? "user" : "kernel");
 	kill (f);
-}
 
+}

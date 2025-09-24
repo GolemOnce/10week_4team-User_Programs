@@ -36,12 +36,14 @@ struct child_process {
     bool waited;           // 부모가 이미 이 자식을 wait했는지 표시. 중복으로 기다리는 일 방지
     int load_success;      // 자식 프로그램이 로딩에 성공했는지. exec/fork 실행 결과를 부모에게 알려줄 때 사용
 	/**
+
      * -> fork로 새 자식 생성 이후 자식의 복제가 완전히 끝나기 전까지 부모를 기다리게 하는 역할
      * 자식이 로드 성공or실패를 확정지을 때까지 load_sema를 down하고 자식이 로드를 끝낸 시점에 up해 깨우면서
      * load_success에 플래그(1/0)을 남긴다. 부모는 깨어난 뒤 load_success를 보고 자식의 결과를 올바르게 확인
      */
     struct semaphore load_sema; // 로드 완료 통보용 (부모는 exec/fork 직후 결과 확정까지 대기)
 	/**
+
      * 자식이 살아있으면 종료될 때까지 블록, 종료되면 exit_status를 받아 리턴
      * 자식이 process_exit으로 종료처리할 때 up되어 부모는 깨어나 exit_status를 읽고 자식을 정리
      */
@@ -125,6 +127,7 @@ static void child_process_detach(struct child_process *child) {
     child->parent = NULL;          // 더 이상 부모와 연결되지 않음 표시
     if (child->exited || child->waited)
         free(child); // 자식이 종료되었거나 부모가 이미 기다렸다면 메모리 해제
+
 }
 #endif
 
@@ -209,9 +212,91 @@ static void
 initd (void *aux) {
 #ifdef VM
 	supplemental_page_table_init (&thread_current ()->spt);
+
 #endif
 
-	process_init ();
+/* 첫 번째 유저랜드 프로그램 "initd"를 FILE_NAME에서 로드하여 시작합니다.
+ * - init 프로세스 생성의 진입점입니다.
+ * - 스레드를 만들어 user 프로그램 로딩 루틴(initd)로 진입하게 합니다.
+ * 새 스레드는 스케줄링될 수 있으며(심지어 종료될 수도 있음),
+ * process_create_initd()가 반환되기 전에 실행될 수 있습니다.
+ * initd의 스레드 id를 반환하고, 생성에 실패하면 TID_ERROR를 반환합니다.
+ * 이 함수는 반드시 한 번만 호출되어야 합니다. */
+tid_t process_create_initd(const char *file_name) {
+    char *fn_copy;
+    tid_t tid;
+
+    char thread_name[16]; // 스레드 이름을 잠시 담아둘 버퍼
+    char *save_ptr;       // strtok_r이 다음 토큰 위치를 기억할 수 있게 해주는 저장용 포인터
+
+    // 원본 문자열 file_name을 위에서 만든 버퍼로 복사
+    strlcpy(thread_name, file_name, sizeof thread_name);
+    // 복사해둔 문자열을 공백을 기준으로 잘라 첫 번째 토큰을 구함
+    char *first_token = strtok_r(thread_name, " ", &save_ptr);
+    if (first_token == NULL)
+        first_token = thread_name;
+
+    /* FILE_NAME의 복사본을 만듭니다.
+     * - 호출자가 넘긴 문자열 버퍼의 라이프사이클과 load()의 사용 시점이 겹치지 않도록
+     *   별도의 페이지에 안전하게 복사합니다. (경쟁 상태 방지) */
+    fn_copy = palloc_get_page(0);
+    if (fn_copy == NULL)
+        return TID_ERROR;
+    strlcpy(fn_copy, file_name, PGSIZE);
+
+    // 지금 실행중인 스레드가 부모임. 부모의 children 리스트에 새 자식 노드를 하나 만들어 붙이고 그 포인터를 받음
+    struct child_process *child = child_process_create(thread_current());
+    if (child == NULL) {
+        palloc_free_page(fn_copy); // 페이지의 메모리 해제
+        return TID_ERROR;          // 스레드 생성 실패를 알림
+    }
+
+    // 자식 스레드 시작 함수로 넘길 인자 패키지를 커널 힙에 동적 할당
+    // exec에 필요한 정보(커맨드 라인, child 노드)
+    struct exec_args *args = malloc(sizeof *args);
+    if (args == NULL) {
+        list_remove(&child->elem);
+        free(child);
+        palloc_free_page(fn_copy);
+        return TID_ERROR;
+    }
+    // 부모가 페이지에 복사해둔 커맨드 라인 문자열을 exec_args에 넣음. 자식 시작 루틴이 process_exec에서 사용
+    args->cmdline = fn_copy;
+    args->child = child; // 부모가 만든 child_process 노드 포인터.
+
+    /* FILE_NAME을 실행할 새 스레드를 생성합니다. */
+    // 새 사용자 스레드 생성
+    // 이름은 first_token, 우선순위 기보값, 시작 함수는 initd, args 패키지를 넘김
+    tid = thread_create(first_token, PRI_DEFAULT, initd, args);
+    if (tid == TID_ERROR) {
+        free(args);
+        list_remove(&child->elem);
+        free(child);
+        palloc_free_page(fn_copy);
+        return TID_ERROR;
+    }
+
+    child->tid = tid; // 성공적으로 스레드가 만들어졌으므로 자식 노드에 실제 tid 기록
+    // 자식 결과 대기. 부모는 여기서 블록되어 자식 측의 로드 성공or실패 통보를 기다림.
+    // 자식은 initd->process exec 경로에서 끝난 뒤 sema_up을 호출
+    sema_down(&child->load_sema);
+
+    // 자식의 로드가 실패
+    if (!child->load_success) {
+        child_process_detach(child); // 부모 리스트에서 노드를 떼기
+        return TID_ERROR;
+    }
+
+    return tid;
+}
+
+/* 첫 번째 사용자 프로세스를 실행하는 스레드 함수
+ * - VM 사용 시 보조 페이지 테이블 초기화
+ * - process_exec()를 호출하여 실제 ELF 로드 및 유저 모드 진입 수행 */
+static void initd(void *aux) {
+#ifdef VM
+    supplemental_page_table_init(&thread_current()->spt);
+#endif
 
 	// 부모가 thread_create로 넘겨준 인자를 exec_args로 해석 - command line buffer, child pointer
 
@@ -282,6 +367,7 @@ process_fork (const char *name, struct intr_frame *if_) {
 	(void)name;
 	(void)if_;
 	return TID_ERROR;
+
 #endif
 }
 
@@ -292,6 +378,7 @@ process_fork (const char *name, struct intr_frame *if_) {
  *   동일한 유저 가상 주소 레이아웃을 구성합니다. */
 static bool
 duplicate_pte (uint64_t *pte, void *va, void *aux) {
+
     // 지금 복제를 수행중인 자식 스레드의 포인터. 이 자식의 pml4(페이지 테이블)에 새 매핑을 추가해야 함
     struct thread *current = thread_current();
     // 부모의 주소공간에서 원본 페이지를 조회하기 위한부모 스레드 포인터
@@ -310,11 +397,13 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 	parent_page = pml4_get_page (parent->pml4, va);
 	if (parent_page == NULL) return true;
 
+
     /* 3. TODO: 자식용 PAL_USER 페이지를 새로 할당하고
      *    TODO: 그 결과를 NEWPAGE에 설정하세요.
      *    - 자식에게 독립적인 페이지 프레임을 부여합니다. */
 	newpage = palloc_get_page(PAL_USER);
 	if (newpage == NULL) return false;
+
 
     /* 4. TODO: 부모의 페이지 내용을 새 페이지로 복제하고,
      *    TODO: 부모 페이지가 쓰기 가능한지 여부를 확인하여
@@ -334,6 +423,7 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 		return false;
 	}
 	return true;
+
 }
 #endif
 
@@ -347,6 +437,7 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
  *   4) 준비가 끝나면 do_iret로 유저 모드 진입 */
 static void
 __do_fork (void *aux) {
+
     struct fork_args *args = aux;              // 부모가 전달한 fork 인자 묶음
     struct intr_frame if_;                     // 자식이 사용할 레지스터 복사본
     struct thread *parent = args->parent;      // 부모 스레드 포인터
@@ -563,8 +654,92 @@ int process_exec(void *f_name) {
      * - do_iret()은 _if에 적힌 유저 레지스터로 복귀(유저 모드 점프)합니다. */
     do_iret(&_if);
     NOT_REACHED();
+
 }
 
+/* 현재 실행 컨텍스트를 f_name으로 전환합니다.
+ * 실패 시 -1을 반환합니다.
+ * - 현재 프로세스의 주소 공간을 파괴하고
+ *   새 ELF를 로드하여 같은 스레드가 새 유저 프로그램으로 실행되도록 합니다(exec). */
+int process_exec(void *f_name) {
+    char *file_name = f_name;
+    bool success;
+    char *argv[MAX_ARGS];                      // 최대 인자 개수만큼 문자열 포인터를 담을 배열
+    int argc = 0;                              // 현재까지 파싱한 인재 개수 카운트
+    char *save_ptr = NULL;                     // strtok_r이 다음 토큰 위치를 기억할 때 쓰는 상태 변수
+    char *token;                               // 방금 잘라낸 토큰의 주소를 담을 포인터 변수
+    struct thread *current = thread_current(); // 현재 실행 중인 스레드(프로세스) 포인터
+
+    if (current->running_file != NULL) {         // 이전 exec에서 열어 둔 실행 파일 핸들이 남아 있다면
+        lock_acquire(&filesys_lock);             // 파일 시스템 접근을 전역 락으로 직렬화
+        file_allow_write(current->running_file); // deny_write 해제해 다른 프로세스가 쓸 수 있게 함
+        file_close(current->running_file);       // 더 이상 사용하지 않으므로 실행 파일 핸들 닫기
+        lock_release(&filesys_lock);             // 파일 작업 종료 후 락 해제
+        current->running_file = NULL;            // 보관 포인터도 초기화
+    }
+
+    // file_name에서 공백을 기준으로 차례차례 잘라가며 토큰을 꺼냄. 더 이상 토큰이 없으면 루프가 끝남
+    for (token = strtok_r(file_name, " ", &save_ptr); token != NULL; token = strtok_r(NULL, " ", &save_ptr)) {
+        // 최대 인자를 초과하면 동적 할당했던 커맨드 문자열 페이지를 해제
+        if (argc >= MAX_ARGS) {
+            palloc_free_page(file_name);
+            return -1; // 실패 반환
+        }
+        // 초과가 아니라면 지금 토큰의 시작 주소를 배열에 저장하고 argc를 1 증가
+        argv[argc++] = token;
+    }
+    // 한 개의 토큰도 나오지 않았을 경우 -> 해제, 실패
+    if (argc == 0) {
+        palloc_free_page(file_name);
+        return -1;
+    }
+
+    /* 스레드 구조체에 있는 intr_frame은 사용할 수 없습니다.
+     * 현재 스레드가 리스케줄될 때, 실행 정보가 그 멤버에 저장되기 때문입니다.
+     * - 지역 intr_frame을 만들어 로딩 결과 레지스터 상태를 담습니다. */
+    struct intr_frame _if;
+    _if.ds = _if.es = _if.ss = SEL_UDSEG;
+    _if.cs = SEL_UCSEG;
+    _if.eflags = FLAG_IF | FLAG_MBS; /* 인터럽트 허용 + 반드시 1이어야 하는 비트 */
+
+    thread_current()->exit_status = -1; // exec 직후에도 기본값을 -1로 재설정(이전 상태 잔재 제거)
+
+    /* 먼저 현재 컨텍스트를 정리합니다.
+     * - 기존 주소 공간/리소스 파괴(유저 공간 해제) */
+    process_cleanup();
+
+    /* 그 다음 바이너리를 로드합니다.
+     * - load()는 ELF를 검사하고, 세그먼트를 매핑하고, 초기 스택을 구성합니다. */
+    // 파싱한 인자 중 첫 번째 항목인 프로그램 이름을 넘겨 ELF 실행 파일을 로드하고
+    // 결과 레지스터 값을 _if에 채움
+    success = load(argv[0], &_if);
+
+    if (!success) {
+        struct child_process *child = thread_current()->child_info; // 부모가 만든 child 노드 참조
+        if (child != NULL) {
+            child->load_success = 0;    // 로드 실패 플래그 기록
+            sema_up(&child->load_sema); // 부모를 깨워 실패 사실 통보
+        }
+        palloc_free_page(file_name);
+        return -1;
+    }
+
+    // 파싱해둔 인자 목록을 바탕으로 사용자 스택과 레지스터를 세팅
+    argument_stack(argv, argc, &_if);
+    // 커맨드 문자열 버퍼는 더이상 쓸 일이 없음
+    palloc_free_page(file_name);
+
+    struct child_process *child = thread_current()->child_info;
+    if (child != NULL) {
+        child->load_success = 1; // 성공 기록
+        sema_up(&child->load_sema);
+    }
+
+    /* 전환된 프로세스를 시작합니다.
+     * - do_iret()은 _if에 적힌 유저 레지스터로 복귀(유저 모드 점프)합니다. */
+    do_iret(&_if);
+    NOT_REACHED();
+}
 
 /* 스레드 TID가 종료될 때까지 기다렸다가 그 종료 상태를 반환한다.
  * 커널에 의해 종료되었으면(예: 예외로 인해 kill된 경우) -1을 반환한다.
@@ -593,6 +768,7 @@ process_wait (tid_t child_tid UNUSED) {
 #else
 	(void)child_tid;
 	return -1;
+
 #endif
 }
 
@@ -655,8 +831,9 @@ static void
 process_cleanup (void) {
 	struct thread *curr = thread_current ();
 
+
 #ifdef VM
-	supplemental_page_table_kill (&curr->spt);
+    supplemental_page_table_kill(&curr->spt);
 #endif
 
 	uint64_t *pml4;
@@ -709,32 +886,33 @@ process_activate (struct thread *next) {
 
 /* 실행 파일 헤더. [ELF1] 1-4 ~ 1-8 참고.
  * ELF 바이너리의 맨 앞에 위치한다. */
+
 struct ELF64_hdr {
-	unsigned char e_ident[EI_NIDENT];
-	uint16_t e_type;
-	uint16_t e_machine;
-	uint32_t e_version;
-	uint64_t e_entry;
-	uint64_t e_phoff;
-	uint64_t e_shoff;
-	uint32_t e_flags;
-	uint16_t e_ehsize;
-	uint16_t e_phentsize;
-	uint16_t e_phnum;
-	uint16_t e_shentsize;
-	uint16_t e_shnum;
-	uint16_t e_shstrndx;
+    unsigned char e_ident[EI_NIDENT];
+    uint16_t e_type;
+    uint16_t e_machine;
+    uint32_t e_version;
+    uint64_t e_entry;
+    uint64_t e_phoff;
+    uint64_t e_shoff;
+    uint32_t e_flags;
+    uint16_t e_ehsize;
+    uint16_t e_phentsize;
+    uint16_t e_phnum;
+    uint16_t e_shentsize;
+    uint16_t e_shnum;
+    uint16_t e_shstrndx;
 };
 
 struct ELF64_PHDR {
-	uint32_t p_type;
-	uint32_t p_flags;
-	uint64_t p_offset;
-	uint64_t p_vaddr;
-	uint64_t p_paddr;
-	uint64_t p_filesz;
-	uint64_t p_memsz;
-	uint64_t p_align;
+    uint32_t p_type;
+    uint32_t p_flags;
+    uint64_t p_offset;
+    uint64_t p_vaddr;
+    uint64_t p_paddr;
+    uint64_t p_filesz;
+    uint64_t p_memsz;
+    uint64_t p_align;
 };
 
 /* 축약형 */
@@ -870,8 +1048,55 @@ done:
 		file_close(file);
 	}
 	return success;		// 전체 로드 성공 여부 반환
+
 }
 
+/**
+ * exec가 성공한 직후 사용자 프로그래밍 기대하는 방식에 맞춰 스택과 레지스터를 정리한다
+ */
+static void argument_stack(char **argv, int argc, struct intr_frame *if_) {
+    // 방금 스택에 복사한 각 문자열의 시작 주소를 기억해두기 위한 임시 배열 나중에 argv 테이블을 만들 때 사용
+    char *arg_addr[MAX_ARGS];
+
+    // 인자를 뒤에서부터 하나씩 꺼내 스택에 복사
+    for (int i = argc - 1; i >= 0; --i) {
+        // rsp를 문자열 길이(+NULL)만큼 내리고, 그 위치에 argv[i] 문자열을 그대로 복사
+        size_t len = strlen(argv[i]) + 1;
+        if_->rsp -= len;
+        memcpy((void *)if_->rsp, argv[i], len);
+        // 복사된 위치의 주소를 arg_addr[i]로 기억한다
+        arg_addr[i] = (char *)if_->rsp;
+    }
+
+    // 현재 rsp가 8의 배수가 될 때까지 한 바이트씩 0을 채워 넣는다
+    while (if_->rsp % 8 != 0) {
+        if_->rsp -= 1;
+        *(uint8_t *)if_->rsp = 0;
+    }
+
+    // argv[argc] = NULL 규칙을 지키기 위해 포인터 하나를 더 push
+    if_->rsp -= sizeof(char *);
+    *(char **)(if_->rsp) = NULL;
+
+    // 마찬가지로 역순으로 진행하며 arg_addr에 저장해 둔 각 문자열 주소를 스택에 push
+    for (int i = argc - 1; i >= 0; --i) {
+        if_->rsp -= sizeof(char *);
+        *(char **)(if_->rsp) = arg_addr[i];
+    }
+
+    // 결과는 현재 rsp가 argv[0] 위치를 가리키게 되고 나중에 레지스터에 넣어줄 값이 됨
+    char **argv_base = (char **)if_->rsp;
+
+    // main 함수가 return했을 때 돌아갈 곳이 없으므로, 0(Null 주소)로 채워 사용자가 잘못된 리턴을 시도했을 때 곧바로
+    // 예외가 발생하도록 한다
+    if_->rsp -= sizeof(void *);
+    *(void **)(if_->rsp) = 0;
+
+    // 유저 mode 진입 시 argc/argv는 RDI/RSI 레지스터로 전달된다
+    // 호출 규약에 맞게 첫 번째 인자(argc)는 RDI, 두 번째 인자(argv)는 RSI에 넣는다
+    if_->R.rdi = (uint64_t)argc;
+    if_->R.rsi = (uint64_t)argv_base;
+}
 
 /* PHDR가 FILE에서 유효하고 로드 가능한 세그먼트를 기술하는지 확인하고,
  * 그렇다면 true, 아니면 false를 반환한다. */
@@ -1068,6 +1293,7 @@ setup_stack (struct intr_frame *if_) {
 	 * TODO: 해당 페이지를 스택으로 표시해야 한다. */
 	/* TODO: 여기에 코드를 작성하라 */
 
-	return success;
+
+    return success;
 }
 #endif /* VM */

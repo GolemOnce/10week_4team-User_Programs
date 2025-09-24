@@ -1,9 +1,18 @@
 #include "userprog/syscall.h"
-#include <stdio.h>
-#include <syscall-nr.h>
+#include "devices/input.h"
+#include "filesys/file.h"
+#include "filesys/filesys.h"
+#include "intrinsic.h"
+#include "lib/kernel/stdio.h"
+#include "threads/flags.h"
+#include "threads/init.h"
 #include "threads/interrupt.h"
-#include "threads/thread.h"
 #include "threads/loader.h"
+#include "threads/mmu.h"
+#include "threads/palloc.h"
+#include "threads/synch.h"
+#include "threads/thread.h"
+#include "threads/vaddr.h"
 #include "userprog/gdt.h"
 #include "threads/flags.h"
 #include "intrinsic.h"
@@ -21,8 +30,12 @@
 #include <stdint.h>
 #include <debug.h>
 
-void syscall_entry (void);
-void syscall_handler (struct intr_frame *);
+
+    /* MSR_LSTAR:
+     *   SYSCALL 실행 시 점프할 "진입 함수 주소"를 지정합니다.
+     *   여기서는 어셈블리로 작성된 syscall_entry()로 연결됩니다.
+     */
+    write_msr(MSR_LSTAR, (uint64_t)syscall_entry);
 
 #define IO_CHUNK 256
 #define MAX_PATH_LEN 512
@@ -56,10 +69,10 @@ static void copy_in_string (char *dst, const char *usrc, size_t size);
 struct lock filesys_lock; // 파일 시스템 API 호출을 직렬화하기 위한 전역 락
 
 /* System call.
+
  *
- * Previously system call services was handled by the interrupt handler
- * (e.g. int 0x80 in linux). However, in x86-64, the manufacturer supplies
- * efficient path for requesting the system call, the `syscall` instruction.
+ * syscall_entry(어셈블리 루틴)에서 유저 모드 → 커널 모드 전환이 끝나면,
+ * 이 함수가 호출됩니다.
  *
  * The syscall instruction works by reading the values from the the Model
  * Specific Register (MSR). For the details, see the manual. */
@@ -89,6 +102,7 @@ static int alloc_fd (struct file *file) {
 		}
 	}
 	return -1;
+
 }
 
 static void die_bad_access(void) {
@@ -118,6 +132,7 @@ static bool get_user_u8 (uint8_t *dst, const uint8_t *uaddr) {
 	// dst에 커널 주소가 가리키는(검증을 통과한 사용자 메모리에서 안전하게 읽어온 1바이트) 값 쓰기
 	*dst = *(uint8_t *)kaddr; 
 	return true;
+
 }
 
 /**

@@ -15,6 +15,13 @@ struct child_process;
 #include "vm/vm.h"
 #endif
 
+#ifdef USERPROG
+struct file;
+struct child_process;
+#endif
+
+#define FD_TABLE_SIZE 128 /* 프로세스당 동시에 열 수 있는 파일 핸들 상한 */
+
 /* 스레드 생애주기 상태 집합 */
 enum thread_status {
     THREAD_RUNNING, /* 실행 중인 스레드 */
@@ -105,6 +112,7 @@ struct thread {
 
 // #ifdef USERPROG
     /* userprog/process.c에서 관리 */
+    int exit_status;            /* 최근 exit(status) 값. 기본 -1, exit() 성공 시 갱신 */
     uint64_t *pml4; /* 사용자 주소 공간의 최상위 페이지 테이블(PML4) 포인터 */
     
     struct thread *parent;  /* 부모 스레드 포인터(NULL 가능) */
@@ -115,6 +123,7 @@ struct thread {
     int exit_status;                /* 사용자 프로그램 종료코드 보관용  */
 
 // #endif
+
 #ifdef VM
     /* 이 스레드가 소유한 전체 가상 메모리를 추적하는 보조 페이지 테이블 */
     struct supplemental_page_table spt;

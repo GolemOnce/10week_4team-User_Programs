@@ -502,6 +502,7 @@ static void init_thread(struct thread *t, const char *name, int priority) {
     list_init(&t->children);
     t->child_info = NULL;
     t->parent = NULL;
+
 #endif
 
     t->nice = 0;                  /* 기본값 */
