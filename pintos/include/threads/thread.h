@@ -5,6 +5,12 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+
+#ifdef USERPROG
+struct file;
+struct child_process;
+#endif
+
 #ifdef VM
 #include "vm/vm.h"
 #endif
@@ -28,8 +34,8 @@ typedef int tid_t;
 #define PRI_MAX 63             /* 최대(가장 높은) 우선순위 */
 #define DONATION_DEPTH_LIMIT 8 // 최대 깊이 제한(순환, 무한 전파 방지)
 
-#define FDT_PAGES 3
-#define FDCOUNT_LIMIT FDT_PAGES * (1<<9)
+#define FD_TABLE_SIZE 128
+
 /* 커널 스레드 또는 사용자 프로세스.
  *
  * 각 스레드 구조체(struct thread)는 자신의 4 kB 페이지 하나에 저장된다.
@@ -101,11 +107,11 @@ struct thread {
     /* userprog/process.c에서 관리 */
     uint64_t *pml4; /* 사용자 주소 공간의 최상위 페이지 테이블(PML4) 포인터 */
     
-    struct thread *parent;
-    struct list child_list; 
-    struct file *running_file;      /* */
-    struct file **fd_table;         /* fd테이블 */
-    int fd_idx;                     /* fd테이블 탐색용 인덱스 */
+    struct thread *parent;  /* 부모 스레드 포인터(NULL 가능) */
+    struct list children;   /* 자식 프로세스(child_process) 링크드 리스트 */
+    struct child_process *child_info;   /* 부모가 가진 child_process 노드(내 정보) */
+    struct file *running_file;  /* exec 후 성공적으로 열린 실행 파일 */
+    struct file **fd_table[FD_TABLE_SIZE];  /* fd 번호 → file 객체 매핑 테이블 (0/1은 표준 입출력 전용) */
     int exit_status;                /* 사용자 프로그램 종료코드 보관용  */
 
 // #endif
